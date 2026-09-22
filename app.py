@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
-import re
 import lightgbm as lgb
 from sentence_transformers import SentenceTransformer
+import csv
+from datetime import datetime
 import os
-# --- 指標計算用のライブラリを追加 ---
-from sklearn.metrics import accuracy_score, recall_score, precision_score, confusion_matrix
+import re
 
+# === 1. モデルの読み込み（キャッシュして高速化） ===
 @st.cache_resource
 def load_models():
     embedder = SentenceTransformer('all-MiniLM-L6-v2')
@@ -17,118 +18,99 @@ def load_models():
 
 embedder, clf = load_models()
 
-def clean_text(text):
-    if not isinstance(text, str):
-        return ""
-    text = re.sub(r'<[^>]*>', '', text)
-    return text.strip()
-
-st.title('AIプロンプトセキュリティ判定システム')
-
-tab1, tab2 = st.tabs(['テキスト直接入力', 'CSVファイル一括判定'])
-
-# --- タブ1: 1件ずつの判定（変更なし） ---
-with tab1:
-    user_input = st.text_area('プロンプトを入力してください:', height=120)
-    if st.button('このテキストを判定'):
-        if user_input and clf is not None:
-            cleaned = clean_text(user_input)
-            vector = embedder.encode([cleaned])
-            score = clf.predict(pd.DataFrame(vector))[0]
-            
-            if score >= 0.5:
-                st.error(f'危険検知！攻撃の可能性が高いです。(スコア: {score:.2f})')
-            else:
-                st.success(f'安全なプロンプトです。(スコア: {score:.2f})')
-        elif clf is None:
-            st.warning('model.pkl が配置されていません。')
-
-# --- タブ2: テキストデータ（CSV）の読み込み判定（指標追加版） ---
-with tab2:
-    uploaded_file = st.file_uploader('判定したいテキストを含むCSVをアップロード', type=['csv'])
-    
-    if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file)
-        
-        text_col = st.selectbox('判定対象のテキスト列を選択してください', df.columns)
-        
-        if st.button('CSV内データを一括判定'):
-            if clf is not None:
-                with st.spinner('ベクトル化および推論中...'):
-                    cleaned_texts = df[text_col].apply(clean_text).tolist()
-                    vectors = embedder.encode(cleaned_texts)
-                    preds = clf.predict(pd.DataFrame(vectors))
-                    
-                    df['risk_score'] = preds
-                    df['is_malicious'] = (preds >= 0.5).astype(int)
-                    
-                    st.success('判定が完了しました！')
-                    
-                    # --- ★ ここから指標の自動計算と表示を追加 ---
-                    if 'label' in df.columns:
-                        st.markdown('### 📊 精度評価レポート')
-                        
-                        y_true = df['label']
-                        y_pred = df['is_malicious']
-                        
-                        # 各種指標の計算
-                        acc = accuracy_score(y_true, y_pred)
-                        recall = recall_score(y_true, y_pred, zero_division=0)
-                        prec = precision_score(y_true, y_pred, zero_division=0)
-                        
-                        # 見やすく3列に並べて表示
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("正解率 (Accuracy)", f"{acc:.1%}")
-                        col2.metric("再現率 (Recall) ※見逃し防止", f"{recall:.1%}")
-                        col3.metric("適合率 (Precision) ※誤検知防止", f"{prec:.1%}")
-                        
-                        # 混同行列（ズレのパターン）の表示
-                        st.write("**混同行列（判定の内訳）**")
-                        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-                        cm_df = pd.DataFrame(cm, 
-                                             index=['本当は安全(0)', '本当は攻撃(1)'], 
-                                             columns=['安全と判定(0)', '攻撃と判定(1)'])
-                        st.dataframe(cm_df)
-                    # -----------------------------------------------
-                    
-                    st.markdown('### 📝 詳細データ')
-                    st.dataframe(df)
-                    
-                    csv_data = df.to_csv(index=False).encode('utf-8_sig')
-                    st.download_button(label='結果CSVをダウンロード', data=csv_data, file_name='prediction_results.csv', mime='text/csv')
-            else:
-                st.warning('model.pkl が配置されていませimport csv
-from datetime import datetime
-import os
-
-# --- ログを保存する関数を追加 ---
+# === 2. ログ保存用関数 ===
 def save_log(text, score, is_blocked):
     log_file = 'app_logs.csv'
-    # ファイルがない場合は見出し（ヘッダー）を作成
+    # ファイルがない場合は新規作成してヘッダーを書き込む
     if not os.path.exists(log_file):
         with open(log_file, 'w', encoding='utf-8-sig', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['timestamp', 'prompt_text', 'risk_score', 'is_blocked'])
     
-    # ログを追記
+    # ログを追記する
     with open(log_file, 'a', encoding='utf-8-sig', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), text, f"{score:.4f}", is_blocked])
-# ------------------------------
 
-# (中略：app.pyのタブ1の中の判定ボタン処理部分)
+# === 3. テキスト前処理関数 ===
+def clean_text(text):
+    # 余分な空白や改行を綺麗にする
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
+# === 4. Streamlit UI 画面構成 ===
+st.title('🛡️ AIセキュリティガードレール')
+
+# モデルがない場合のエラーハンドリング
+if clf is None:
+    st.warning('⚠️ 「model.pkl」が配置されていません。Colabでダウンロードしたファイルを同じフォルダに配置してください。')
+    st.stop() # ここで処理を止める
+
+tab1, tab2 = st.tabs(["💬 テキスト直接入力", "📁 CSV一括判定"])
+
+# --- タブ1: テキスト直接入力とログ保存 ---
+with tab1:
+    st.markdown("### プロンプトインジェクション判定")
+    user_input = st.text_area("判定したいテキストを入力してください", height=150)
+    
     if st.button('このテキストを判定'):
-        if user_input and clf is not None:
-            cleaned = clean_text(user_input)
-            vector = embedder.encode([cleaned])
+        if user_input:
+            cleaned_text = clean_text(user_input)
+            
+            # ベクトル化してLightGBMでスコア算出
+            vector = embedder.encode([cleaned_text])
             score = clf.predict(pd.DataFrame(vector))[0]
             
-            # --- 判定結果の表示と同時にログを保存 ---
+            # スコアによるブロック判定と画面表示、ログ保存
             if score >= 0.5:
-                st.error(f'危険検知！攻撃の可能性が高いです。(スコア: {score:.2f})')
-                save_log(cleaned, score, is_blocked=1) # ブロックした記録
+                st.error(f'🚨 危険検知！攻撃の可能性が高いです。(危険スコア: {score:.4f})')
+                save_log(cleaned_text, score, is_blocked=1)
             else:
-                st.success(f'安全なプロンプトです。(スコア: {score:.2f})')
-                save_log(cleaned, score, is_blocked=0) # 通した記録
+                st.success(f'✅ 安全なプロンプトです。(危険スコア: {score:.4f})')
+                save_log(cleaned_text, score, is_blocked=0)
+        else:
+            st.warning("テキストを入力してください。")
 
+# --- タブ2: CSV一括判定（テスト・検証用） ---
+with tab2:
+    st.markdown("### 複数データの一括テスト")
+    uploaded_file = st.file_uploader("テスト用CSVをアップロード（'text'列が必要です）", type=['csv'])
+    
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file)
+        
+        if 'text' not in df.columns:
+            st.error("CSVファイルに「text」という列が見つかりません。")
+        else:
+            st.write(f"読み込み完了: {len(df)} 件のデータを判定します...")
+            
+            if st.button('一括判定を開始'):
+                df['cleaned_text'] = df['text'].apply(clean_text)
+                
+                # プログレスバーの表示
+                progress_bar = st.progress(0)
+                
+                st.text("テキストを数値化しています...")
+                vectors = embedder.encode(df['cleaned_text'].tolist(), show_progress_bar=False)
+                
+                st.text("AIが危険度を判定中...")
+                scores = clf.predict(pd.DataFrame(vectors))
+                
+                # 結果をDataFrameに反映
+                df['risk_score'] = scores
+                df['is_malicious'] = (df['risk_score'] >= 0.5).astype(int)
+                
+                progress_bar.progress(100)
+                
+                st.success("判定完了！")
+                # 結果のプレビュー（先頭20件）
+                st.dataframe(df[['text', 'risk_score', 'is_malicious']].head(20))
+                
+                # ダウンロードボタン
+                csv_data = df.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    label="判定結果CSVをダウンロード",
+                    data=csv_data,
+                    file_name='prediction_results.csv',
+                    mime='text/csv'
+                )
