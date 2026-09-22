@@ -97,4 +97,38 @@ with tab2:
                     csv_data = df.to_csv(index=False).encode('utf-8_sig')
                     st.download_button(label='結果CSVをダウンロード', data=csv_data, file_name='prediction_results.csv', mime='text/csv')
             else:
-                st.warning('model.pkl が配置されていません。')
+                st.warning('model.pkl が配置されていませimport csv
+from datetime import datetime
+import os
+
+# --- ログを保存する関数を追加 ---
+def save_log(text, score, is_blocked):
+    log_file = 'app_logs.csv'
+    # ファイルがない場合は見出し（ヘッダー）を作成
+    if not os.path.exists(log_file):
+        with open(log_file, 'w', encoding='utf-8-sig', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['timestamp', 'prompt_text', 'risk_score', 'is_blocked'])
+    
+    # ログを追記
+    with open(log_file, 'a', encoding='utf-8-sig', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), text, f"{score:.4f}", is_blocked])
+# ------------------------------
+
+# (中略：app.pyのタブ1の中の判定ボタン処理部分)
+
+    if st.button('このテキストを判定'):
+        if user_input and clf is not None:
+            cleaned = clean_text(user_input)
+            vector = embedder.encode([cleaned])
+            score = clf.predict(pd.DataFrame(vector))[0]
+            
+            # --- 判定結果の表示と同時にログを保存 ---
+            if score >= 0.5:
+                st.error(f'危険検知！攻撃の可能性が高いです。(スコア: {score:.2f})')
+                save_log(cleaned, score, is_blocked=1) # ブロックした記録
+            else:
+                st.success(f'安全なプロンプトです。(スコア: {score:.2f})')
+                save_log(cleaned, score, is_blocked=0) # 通した記録
+
