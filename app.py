@@ -4,8 +4,9 @@ import re
 import lightgbm as lgb
 from sentence_transformers import SentenceTransformer
 import os
+# --- 指標計算用のライブラリを追加 ---
+from sklearn.metrics import accuracy_score, recall_score, precision_score, confusion_matrix
 
-# --- モデルの読み込み（初回のみ実行・キャッシュ） ---
 @st.cache_resource
 def load_models():
     embedder = SentenceTransformer('all-MiniLM-L6-v2')
@@ -16,7 +17,6 @@ def load_models():
 
 embedder, clf = load_models()
 
-# --- 前処理関数 ---
 def clean_text(text):
     if not isinstance(text, str):
         return ""
@@ -27,7 +27,7 @@ st.title('AIプロンプトセキュリティ判定システム')
 
 tab1, tab2 = st.tabs(['テキスト直接入力', 'CSVファイル一括判定'])
 
-# --- タブ1: 1件ずつの判定 ---
+# --- タブ1: 1件ずつの判定（変更なし） ---
 with tab1:
     user_input = st.text_area('プロンプトを入力してください:', height=120)
     if st.button('このテキストを判定'):
@@ -43,43 +43,58 @@ with tab1:
         elif clf is None:
             st.warning('model.pkl が配置されていません。')
 
-# --- タブ2: テキストデータ（CSV）の読み込み判定 ---
+# --- タブ2: テキストデータ（CSV）の読み込み判定（指標追加版） ---
 with tab2:
     uploaded_file = st.file_uploader('判定したいテキストを含むCSVをアップロード', type=['csv'])
     
     if uploaded_file is not None:
         df = pd.read_csv(uploaded_file)
-        st.write('読み込んだデータプレビュー:', df.head(3))
         
-        # テキストが含まれる列名を選択
         text_col = st.selectbox('判定対象のテキスト列を選択してください', df.columns)
         
         if st.button('CSV内データを一括判定'):
             if clf is not None:
-                with st.spinner('ベクトル化およびLightGBM推論中...'):
-                    # 1. 前処理
+                with st.spinner('ベクトル化および推論中...'):
                     cleaned_texts = df[text_col].apply(clean_text).tolist()
-                    
-                    # 2. ベクトル化
                     vectors = embedder.encode(cleaned_texts)
-                    
-                    # 3. LightGBM推論
                     preds = clf.predict(pd.DataFrame(vectors))
                     
-                    # 結果を元のデータフレームに追加
                     df['risk_score'] = preds
                     df['is_malicious'] = (preds >= 0.5).astype(int)
                     
                     st.success('判定が完了しました！')
+                    
+                    # --- ★ ここから指標の自動計算と表示を追加 ---
+                    if 'label' in df.columns:
+                        st.markdown('### 📊 精度評価レポート')
+                        
+                        y_true = df['label']
+                        y_pred = df['is_malicious']
+                        
+                        # 各種指標の計算
+                        acc = accuracy_score(y_true, y_pred)
+                        recall = recall_score(y_true, y_pred, zero_division=0)
+                        prec = precision_score(y_true, y_pred, zero_division=0)
+                        
+                        # 見やすく3列に並べて表示
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("正解率 (Accuracy)", f"{acc:.1%}")
+                        col2.metric("再現率 (Recall) ※見逃し防止", f"{recall:.1%}")
+                        col3.metric("適合率 (Precision) ※誤検知防止", f"{prec:.1%}")
+                        
+                        # 混同行列（ズレのパターン）の表示
+                        st.write("**混同行列（判定の内訳）**")
+                        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+                        cm_df = pd.DataFrame(cm, 
+                                             index=['本当は安全(0)', '本当は攻撃(1)'], 
+                                             columns=['安全と判定(0)', '攻撃と判定(1)'])
+                        st.dataframe(cm_df)
+                    # -----------------------------------------------
+                    
+                    st.markdown('### 📝 詳細データ')
                     st.dataframe(df)
                     
-                    # 判定結果CSVのダウンロードボタン
                     csv_data = df.to_csv(index=False).encode('utf-8_sig')
-                    st.download_button(
-                        label='判定結果CSVをダウンロード',
-                        data=csv_data,
-                        file_name='prediction_results.csv',
-                        mime='text/csv'
-                    )
+                    st.download_button(label='結果CSVをダウンロード', data=csv_data, file_name='prediction_results.csv', mime='text/csv')
             else:
                 st.warning('model.pkl が配置されていません。')
